@@ -21,17 +21,18 @@ use super::sketch_stage::{
     PossibleEntry, SketchLimits, SketchWork, held_seeds, keep_found_seeds, sketch_stage_known,
 };
 use super::times::{PartStart, PartTime, SearchTimes};
-use crate::align::{AlignmentError, Interval};
+use crate::align::Interval;
 use crate::decide::DecisionRule;
 use crate::index::{SeedLocation, Shard, StoredSeed, seed_key};
 use crate::loss::{MaxMiss, MissModel};
 use crate::seeds::{Seeder, low_complexity_mask};
+use crate::storage::lock;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// The settings of one search.
@@ -109,6 +110,12 @@ pub struct SearchSummary {
     pub align: AlignStageWork,
     /// Wall seconds, CPU seconds and major page faults of the parts of the search.
     pub times: SearchTimes,
+    /// One line for each entry that passed a limit of stage 3 and was decided once the limit
+    /// was raised.
+    pub raised: Vec<String>,
+    /// One line for each entry that passed a limit of stage 3 that the memory budget could not
+    /// raise, so the entry was not decided.
+    pub limited: Vec<String>,
 }
 
 /// The seed keys held by the sketch, found by `Searcher::prepare_kmers` for a batch of queries,
@@ -356,6 +363,7 @@ impl<'a> Searcher<'a> {
                 }
             };
             let workspace = AlignStageWorkspace::default();
+            let passed = Mutex::new(Vec::new());
             let request = Request {
                 config,
                 prepared: prepared.as_ref(),
@@ -364,6 +372,7 @@ impl<'a> Searcher<'a> {
                 events,
                 low_complexity,
                 known: held.as_deref().map_or(&own_known, |held| held),
+                passed: &passed,
             };
             let mut summary = self.run(&query_kmers, circular, &plan, budget, &request, start);
             summary.seed_mismatches = plan.level() as u8;
@@ -490,8 +499,108 @@ impl<'a> Searcher<'a> {
             will_need_entry(self.shard, possible.entry, &locations[index], reach);
         };
         queue.run(finish, prefetch, &mut summary);
+        let passed = std::mem::take(&mut *lock(request.passed));
+        self.align_again(passed, request, &mut summary);
+        // A stop or a failure says more than a resource drop, so it takes precedence.
+        if matches!(summary.completion, Completion::Complete) && summary.align.limited_entries > 0 {
+            summary.completion = Completion::ResourceIncomplete;
+        }
         summary.times.entries = start.finish();
         summary
+    }
+
+    /// Aligns the entries that passed a limit of stage 3 again, one at a time on all threads of
+    /// the search, and reports their last events. Each time an entry passes a limit, that limit
+    /// is raised within the memory budget. An entry whose limit cannot be raised is dropped for
+    /// it. After a stop or a failure, the entries left are unfinished.
+    fn align_again(
+        &self,
+        passed: Vec<(LocatedEntry, AlignStageError)>,
+        request: &Request<'_>,
+        summary: &mut SearchSummary,
+    ) {
+        let Some(prepared) = request.prepared else {
+            return;
+        };
+        let threads = rayon::current_num_threads();
+        let mut worker = Worker::default();
+        for (located, first) in passed {
+            let entry = located.entry;
+            if !matches!(summary.completion, Completion::Complete) {
+                let unfinished = EntryEvent::Unfinished {
+                    entry,
+                    stage: SearchStage::Align,
+                };
+                // A dropped receiver means nobody listens any more.
+                let _ = request.events.send(unfinished);
+                continue;
+            }
+            let started = Instant::now();
+            let (mut config, mut error) = (*request.config, first);
+            let first = error.to_string();
+            let last = loop {
+                let passed = error.passed_limit();
+                let raised =
+                    passed.and_then(|(limit, needed)| config.align.raised(limit, needed, threads));
+                let Some(raised) = raised else {
+                    break Ok(Err(error));
+                };
+                config.align = raised;
+                let again = Request {
+                    config: &config,
+                    ..*request
+                };
+                match self.align(prepared, &located, &again, &mut worker) {
+                    Ok(Err(passed)) => error = passed,
+                    last => break last,
+                }
+            };
+            worker.align.seconds += started.elapsed().as_secs_f64();
+            let name = self.entry_name(entry);
+            let last = match last {
+                Ok(Ok(last)) => {
+                    summary.raised.push(format!(
+                        "entry {name} passed a limit ({first}) and was aligned again alone \
+                         with it raised"
+                    ));
+                    last
+                }
+                Ok(Err(error)) => {
+                    worker.align.limited_entries += 1;
+                    summary.limited.push(format!(
+                        "entry {name} was not decided: {error}; it cannot be raised further \
+                         within the memory budget of {} bytes",
+                        config.align.memory_budget
+                    ));
+                    EntryEvent::Dropped {
+                        entry,
+                        stage: SearchStage::Align,
+                        reason: DropReason::ResourceLimit,
+                    }
+                }
+                Err(error) => {
+                    summary.completion = error.into();
+                    EntryEvent::Unfinished {
+                        entry,
+                        stage: SearchStage::Align,
+                    }
+                }
+            };
+            if request.events.send(last).is_err()
+                && matches!(summary.completion, Completion::Complete)
+            {
+                summary.completion = Completion::Stopped(Stopped::Asked);
+            }
+        }
+        summary.align.add(&worker.align);
+    }
+
+    /// The name of an entry of the shard, or its index when the manifest does not hold it.
+    fn entry_name(&self, entry: u32) -> String {
+        let entries = &self.shard.manifest().entries;
+        entries
+            .get(entry as usize)
+            .map_or_else(|| entry.to_string(), |held| held.name.clone())
     }
 
     /// The summary of a complete search of a query of `length` bases that did no work yet.
@@ -507,6 +616,8 @@ impl<'a> Searcher<'a> {
                 open_shard_seconds: self.shard.take_open_seconds(),
                 ..SearchTimes::default()
             },
+            raised: Vec::new(),
+            limited: Vec::new(),
         }
     }
 
@@ -575,18 +686,26 @@ impl<'a> Searcher<'a> {
             stage: SearchStage::Align,
             error,
         })?;
-        emit(events, last, SearchStage::Align)
+        match last {
+            Ok(last) => emit(events, last, SearchStage::Align),
+            // Aligned again alone, once the other entries are done.
+            Err(passed) => {
+                lock(request.passed).push((located, passed));
+                Ok(())
+            }
+        }
     }
 
     /// Stage 3 for one located entry: opens its packed sequence once, aligns and decides, and
-    /// returns the last event of the entry, confirmed (with the contig table) or dropped.
+    /// returns the last event of the entry, confirmed (with the contig table) or dropped, or the
+    /// error of a limit of stage 3 that the entry passed.
     fn align(
         &self,
         prepared: &PreparedQuery,
         located: &LocatedEntry,
         request: &Request<'_>,
         worker: &mut Worker,
-    ) -> Result<EntryEvent, SearchError> {
+    ) -> Result<Result<EntryEvent, AlignStageError>, SearchError> {
         let packed = self.shard.packed(located.entry)?;
         let windows = located.alignment_windows.iter();
         packed.will_need(windows.flat_map(|w| w.ranges.iter().map(|r| (w.contig as usize, r))));
@@ -606,25 +725,22 @@ impl<'a> Searcher<'a> {
         };
         let aligned = match aligned {
             Ok(aligned) => aligned,
-            Err(error) if is_resource_limit(&error) => {
-                worker.align.limited_entries += 1;
-                return Ok(dropped(DropReason::ResourceLimit));
-            }
+            Err(error) if error.passed_limit().is_some() => return Ok(Err(error)),
             Err(error) => return Err(error.into()),
         };
         worker.align.counts.add(&aligned.work);
         if !aligned.decision.qualifies {
-            return Ok(dropped(DropReason::Decision));
+            return Ok(Ok(dropped(DropReason::Decision)));
         }
         worker.align.confirmed_entries += 1;
         let mosaic = &aligned.decision.mosaic;
         let primary = mosaic.primary.iter().map(|selected| &selected.fragment);
         let fragments = primary.chain(&mosaic.alternatives);
         let contigs = packed.contigs(fragments.map(|fragment| fragment.contig_index))?;
-        Ok(EntryEvent::Confirmed {
+        Ok(Ok(EntryEvent::Confirmed {
             aligned: Box::new(aligned),
             contigs,
-        })
+        }))
     }
 }
 
@@ -642,6 +758,8 @@ struct Request<'a> {
     low_complexity: u64,
     /// The stored seeds of seed keys that the lookups found already, ascending by key.
     known: &'a [(u64, StoredSeed)],
+    /// The entries that passed a limit of stage 3, with the error of the limit.
+    passed: &'a Mutex<Vec<(LocatedEntry, AlignStageError)>>,
 }
 
 /// What one worker thread keeps across entries: its buffers and its share of the work.
@@ -714,10 +832,6 @@ impl<'a> EntryQueue<'a> {
                 summary.completion = error.into();
             }
         }
-        // A stop or a failure says more than a resource drop, so it takes precedence.
-        if matches!(summary.completion, Completion::Complete) && summary.align.limited_entries > 0 {
-            summary.completion = Completion::ResourceIncomplete;
-        }
     }
 
     fn work_on<F, P>(&self, finish: &F, prefetch: &P, ahead: usize) -> WorkerEnd
@@ -781,18 +895,6 @@ impl<'a> EntryQueue<'a> {
         // A dropped receiver means nobody listens any more.
         let _ = self.events.send(EntryEvent::Unfinished { entry, stage });
     }
-}
-
-/// Whether stage 3 gave up on an entry for a memory or work limit rather than for an error;
-/// such an entry is dropped, the other entries go on, and the search ends `ResourceIncomplete`.
-fn is_resource_limit(error: &AlignStageError) -> bool {
-    matches!(
-        error,
-        AlignStageError::TooLarge { .. }
-            | AlignStageError::Alignment(
-                AlignmentError::MatrixTooLarge { .. } | AlignmentError::ChainingBudget(_)
-            )
-    )
 }
 
 /// Sends one event; a dropped receiver stops the search as if asked.

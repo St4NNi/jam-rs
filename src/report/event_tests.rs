@@ -106,6 +106,8 @@ fn summary_names_status() {
         locate: Default::default(),
         align: Default::default(),
         times: Default::default(),
+        raised: Vec::new(),
+        limited: Vec::new(),
     };
     let record = Record::summary("q1", &summary);
     round_trip(&record);
@@ -127,6 +129,8 @@ fn resource_drop_named() {
         locate: Default::default(),
         align: Default::default(),
         times: Default::default(),
+        raised: Vec::new(),
+        limited: Vec::new(),
     };
     let record = Record::summary("q1", &summary);
     round_trip(&record);

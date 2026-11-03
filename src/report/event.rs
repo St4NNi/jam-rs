@@ -215,7 +215,8 @@ impl Record {
         let (status, reason, error) = match &summary.completion {
             Completion::Complete => (Status::Complete, None, None),
             Completion::ResourceIncomplete => {
-                (Status::Incomplete, Some(Reason::ResourceLimit), None)
+                let limited = (!summary.limited.is_empty()).then(|| summary.limited.join("; "));
+                (Status::Incomplete, Some(Reason::ResourceLimit), limited)
             }
             Completion::Stopped(Stopped::Deadline) => {
                 (Status::Stopped, Some(Reason::Deadline), None)

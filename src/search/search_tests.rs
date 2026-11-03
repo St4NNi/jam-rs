@@ -520,17 +520,47 @@ fn decision_drops_entry() {
     assert_eq!(summary.align.confirmed_entries, 0);
 }
 
-/// An entry whose fragments pass the memory limit is dropped; the other entries go on, but the
-/// search is not complete, since a qualifying entry may be missing.
+/// An entry whose fragments pass the memory limit is aligned again alone once the other entries
+/// are done, with the limit raised, and decided as with the default limits.
+#[test]
+fn oversized_entry_aligned_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = planted_shard(directory.path());
+    let config = config(SearchStage::Align);
+    let (expected, expected_events) = search(&shard, &query, false, &config, false);
+    let mut limited = config;
+    limited.align.max_fragment_bytes = 1;
+    let (summary, events) = search(&shard, &query, false, &limited, false);
+    assert!(matches!(summary.completion, Completion::Complete));
+    assert_eq!(summary.align.limited_entries, 0);
+    assert_eq!(summary.align.confirmed_entries, 2);
+    assert_eq!(summary.align.counts, expected.align.counts);
+    assert_eq!(summary.raised.len(), 2);
+    assert!(summary.raised[0].contains("the fragments of one entry need"));
+    assert!(summary.limited.is_empty());
+    assert_eq!(events, expected_events);
+}
+
+/// An entry whose limit the memory budget cannot raise is dropped for it; the other entries go
+/// on, but the search is not complete, and the summary names the entry and the limit.
 #[test]
 fn oversized_entry_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
     let mut config = config(SearchStage::Align);
     config.align.max_fragment_bytes = 1;
+    // Room for 64 more bytes of fragments on the three threads of the search, too few for one.
+    config.align.memory_budget = config.align.footprint(3) + 64;
     let (summary, events) = search(&shard, &query, false, &config, false);
     assert!(matches!(summary.completion, Completion::ResourceIncomplete));
     assert_eq!(summary.align.limited_entries, 2);
+    assert!(summary.raised.is_empty());
+    assert_eq!(summary.limited.len(), 2);
+    for line in &summary.limited {
+        assert!(line.contains("the fragments of one entry need"), "{line}");
+        assert!(line.contains("more than the limit of 65;"), "{line}");
+        assert!(line.contains("memory budget"), "{line}");
+    }
     for entry in [0, 1] {
         assert_eq!(
             *last_event(&events, entry),
