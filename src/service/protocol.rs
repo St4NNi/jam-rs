@@ -17,7 +17,7 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 /// The ALPN of the protocol. Its last part is the version, so a client and a server of other
 /// versions do not connect.
-pub const ALPN: &[u8] = b"jam/1";
+pub const ALPN: &[u8] = b"jam/2";
 
 /// The largest message, so a damaged length cannot claim unbounded memory. It also bounds the
 /// query length.

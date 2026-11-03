@@ -37,6 +37,23 @@ struct AlignedLine<'a> {
     /// Fragments that add no new query base, such as other copies of the same region.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     alt: Vec<FragmentLine<'a>>,
+    /// Only for an entry decided within its limits, as the memory budget could not raise one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limited: Option<LimitedLine<'a>>,
+}
+
+/// The limit that an entry decided within its limits passed, and the share of the bytes of its
+/// fragments kept.
+#[derive(Serialize)]
+struct LimitedLine<'a> {
+    limit: &'a str,
+    kept: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    left_out_contigs: u32,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 /// The result line of `record` in a search up to `level`: possible entries at the sketch
@@ -83,6 +100,11 @@ fn confirmed_line(confirmed: &Confirmed) -> ResultLine<'_> {
             bases: decision.covered_bases,
             f: fragment_lines(&decision.fragments),
             alt: fragment_lines(&decision.alternatives),
+            limited: confirmed.limited.as_ref().map(|limited| LimitedLine {
+                limit: &limited.limit,
+                kept: rounded(limited.kept, 4),
+                left_out_contigs: limited.left_out_contigs,
+            }),
         }),
     }
 }

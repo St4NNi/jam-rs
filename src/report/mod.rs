@@ -11,8 +11,8 @@ mod paf;
 pub use compact::{QueryTotals, TSV_HEADER, result_line, tsv_line};
 pub use decision::{DecisionRecord, FragmentRecord};
 pub use event::{
-    Confirmed, Dropped, Located, Possible, Reason, Record, ShardRecord, Status, Summary,
-    Unfinished, Window,
+    Confirmed, Dropped, LimitedRecord, Located, Possible, Reason, Record, ShardRecord, Status,
+    Summary, Unfinished, Window,
 };
 pub use paf::paf_lines;
 

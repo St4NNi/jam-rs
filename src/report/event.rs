@@ -81,6 +81,20 @@ pub struct Confirmed {
     pub query: String,
     pub entry: String,
     pub decision: DecisionRecord,
+    /// How the entry was decided within its limits, when the memory budget could not raise a
+    /// limit it passed.
+    pub limited: Option<LimitedRecord>,
+}
+
+/// How an entry was decided within its limits.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LimitedRecord {
+    /// The limit it passed, with the size it needed.
+    pub limit: String,
+    /// The share of the bytes of its fragments that was kept, 0 to 1.
+    pub kept: f64,
+    /// Contigs left out, as they passed another limit.
+    pub left_out_contigs: u32,
 }
 
 /// The entry left the search at `stage`.
@@ -179,6 +193,11 @@ impl Record {
                 query,
                 entry,
                 decision: DecisionRecord::new(&aligned.decision, contigs)?,
+                limited: aligned.limited.as_ref().map(|limited| LimitedRecord {
+                    limit: limited.limit.clone(),
+                    kept: limited.kept,
+                    left_out_contigs: limited.left_out_contigs,
+                }),
             }),
             EntryEvent::Dropped { stage, reason, .. } => Self::Dropped(Dropped {
                 query,

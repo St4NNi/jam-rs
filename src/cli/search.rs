@@ -197,6 +197,8 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
             };
         searchers.iter().map(bound).max().unwrap_or(0)
     };
+    // Entries decided within their limits, for the last line.
+    let mut limited = 0;
     let incomplete = each_batch(inputs.query, budget, lookups, |batch| {
         let pairs: Vec<(&[u8], bool)> = (batch.iter())
             .map(|(_, sequence)| (sequence.as_slice(), args.circular))
@@ -216,7 +218,7 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
                     let kmers = kmers[index].take();
                     let write = |event: EntryEvent| sink.event(open, name, &event);
                     let summary = search_one(args, searcher, &config, &query, kmers, write)?;
-                    note_raised(name, &open.name, &summary);
+                    limited += note_limits(name, &open.name, &summary);
                     sink.record(&open.name, Record::summary(name, &summary))?;
                 }
             } else {
@@ -240,7 +242,7 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
                         sink.event(open, name, event)?;
                     }
                     let summary = summary?;
-                    note_raised(name, &open.name, &summary);
+                    limited += note_limits(name, &open.name, &summary);
                     sink.record(&open.name, Record::summary(name, &summary))
                 })?;
             }
@@ -252,6 +254,13 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         .first()
         .and_then(|searcher| searcher.target_length(&config));
     sink.hint(&config, from)?;
+    if limited > 0 {
+        eprintln!(
+            "jam: {limited} entries were decided within their limits, as the memory budget \
+             could not raise a limit they passed; the lines above name them, and the JSON lines \
+             of those confirmed have a \"limited\" field"
+        );
+    }
     match incomplete {
         0 => Ok(()),
         count => Err(CliError::Incomplete(count)),
@@ -373,12 +382,14 @@ fn each_batch(
     }
 }
 
-/// Writes a line on the standard error for each entry of `shard` that passed a limit of stage 3
-/// and was decided once the limit was raised.
-fn note_raised(query: &str, shard: &str, summary: &SearchSummary) {
-    for line in &summary.raised {
+/// Writes a line on the standard error for each entry of `shard` that passed a limit of stage 3:
+/// decided once the limit was raised, or within its limits. Returns how many were decided within
+/// their limits.
+fn note_limits(query: &str, shard: &str, summary: &SearchSummary) -> usize {
+    for line in summary.raised.iter().chain(&summary.limited) {
         eprintln!("jam: query {query}, shard {shard}: {line}");
     }
+    summary.limited.len()
 }
 
 /// One query record.

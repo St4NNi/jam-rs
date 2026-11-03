@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::align::Interval;
-use crate::report::{DecisionRecord, Located, Possible, Window};
+use crate::report::{DecisionRecord, LimitedRecord, Located, Possible, Window};
 use serde_json::{Value, json};
 
 fn line(record: &Record, level: SearchStage) -> Option<Value> {
@@ -84,6 +84,7 @@ fn align_line() {
         query: "q1".into(),
         entry: "a1".into(),
         decision,
+        limited: None,
     });
     let expected = json!({"q": "q1", "a": "a1", "s": 3, "cov": 0.8, "id": 0.7778, "bases": 8,
         "f": [["c1", 2, 10, 100, 109, "+", "3=1X3=1D1="]],
@@ -93,6 +94,21 @@ fn align_line() {
         unreachable!()
     };
     assert_eq!(tsv_line(&confirmed), "q1\ta1\t0.8\t0.7778\t8\t1");
+    // An entry decided within its limits says so; its other fields stay as they are.
+    let limited = Record::Confirmed(Confirmed {
+        limited: Some(LimitedRecord {
+            limit: "the fragments of one entry".into(),
+            kept: 0.25,
+            left_out_contigs: 0,
+        }),
+        ..confirmed
+    });
+    let limited = line(&limited, SearchStage::Align).unwrap();
+    let expected = json!({"limit": "the fragments of one entry", "kept": 0.25});
+    assert_eq!(
+        (&limited["limited"], &limited["cov"]),
+        (&expected, &json!(0.8))
+    );
 }
 
 fn summary(status: Status, reason: Option<Reason>) -> Summary {

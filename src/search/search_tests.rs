@@ -541,10 +541,11 @@ fn oversized_entry_aligned_again() {
     assert_eq!(events, expected_events);
 }
 
-/// An entry whose limit the memory budget cannot raise is dropped for it; the other entries go
-/// on, but the search is not complete, and the summary names the entry and the limit.
+/// An entry whose limit the memory budget cannot raise is decided within its limits: the
+/// search completes, and the summary names the entry, the limit and the share kept. Its
+/// fragments stay within the limit that the tiny budget allows, so none is kept here.
 #[test]
-fn oversized_entry_dropped() {
+fn oversized_entry_within_limits() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
     let mut config = config(SearchStage::Align);
@@ -552,14 +553,14 @@ fn oversized_entry_dropped() {
     // Room for 64 more bytes of fragments on the three threads of the search, too few for one.
     config.align.memory_budget = config.align.footprint(3) + 64;
     let (summary, events) = search(&shard, &query, false, &config, false);
-    assert!(matches!(summary.completion, Completion::ResourceIncomplete));
+    assert!(matches!(summary.completion, Completion::Complete));
     assert_eq!(summary.align.limited_entries, 2);
     assert!(summary.raised.is_empty());
     assert_eq!(summary.limited.len(), 2);
     for line in &summary.limited {
-        assert!(line.contains("the fragments of one entry need"), "{line}");
+        assert!(line.contains("decided within its limits"), "{line}");
         assert!(line.contains("more than the limit of 65;"), "{line}");
-        assert!(line.contains("memory budget"), "{line}");
+        assert!(line.contains("0.0% of its fragment bytes kept"), "{line}");
     }
     for entry in [0, 1] {
         assert_eq!(
@@ -567,7 +568,7 @@ fn oversized_entry_dropped() {
             EntryEvent::Dropped {
                 entry,
                 stage: SearchStage::Align,
-                reason: DropReason::ResourceLimit,
+                reason: DropReason::Decision,
             }
         );
     }

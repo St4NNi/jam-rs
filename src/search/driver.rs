@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::align_stage::{
-    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
+    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, Limited, PreparedQuery,
     align_packed_entry,
 };
 use super::control::{SearchControl, Stopped};
@@ -114,7 +114,8 @@ pub struct SearchSummary {
     /// was raised.
     pub raised: Vec<String>,
     /// One line for each entry that passed a limit of stage 3 that the memory budget could not
-    /// raise, so the entry was not decided.
+    /// raise, so the entry was decided within its limits (or, should even that fail, not
+    /// decided).
     pub limited: Vec<String>,
 }
 
@@ -133,7 +134,8 @@ pub struct AlignStageWork {
     pub entries: u64,
     /// Entries that qualify.
     pub confirmed_entries: u64,
-    /// Entries dropped for a resource limit, and so not decided.
+    /// Entries that passed a limit that the memory budget could not raise: decided within their
+    /// limits, with part of their fragments or contigs (or, should even that fail, not decided).
     pub limited_entries: u64,
     /// Windows, bases read, anchors, chains and alignments.
     pub counts: AlignWork,
@@ -501,18 +503,15 @@ impl<'a> Searcher<'a> {
         queue.run(finish, prefetch, &mut summary);
         let passed = std::mem::take(&mut *lock(request.passed));
         self.align_again(passed, request, &mut summary);
-        // A stop or a failure says more than a resource drop, so it takes precedence.
-        if matches!(summary.completion, Completion::Complete) && summary.align.limited_entries > 0 {
-            summary.completion = Completion::ResourceIncomplete;
-        }
         summary.times.entries = start.finish();
         summary
     }
 
     /// Aligns the entries that passed a limit of stage 3 again, one at a time on all threads of
     /// the search, and reports their last events. Each time an entry passes a limit, that limit
-    /// is raised within the memory budget. An entry whose limit cannot be raised is dropped for
-    /// it. After a stop or a failure, the entries left are unfinished.
+    /// is raised within the memory budget. An entry whose limit cannot be raised is decided
+    /// within its limits, as the last resort. After a stop or a failure, the entries left are
+    /// unfinished.
     fn align_again(
         &self,
         passed: Vec<(LocatedEntry, AlignStageError)>,
@@ -524,6 +523,7 @@ impl<'a> Searcher<'a> {
         };
         let threads = rayon::current_num_threads();
         let mut worker = Worker::default();
+        let mut undecided = false;
         for (located, first) in passed {
             let entry = located.entry;
             if !matches!(summary.completion, Completion::Complete) {
@@ -543,7 +543,16 @@ impl<'a> Searcher<'a> {
                 let raised =
                     passed.and_then(|(limit, needed)| config.align.raised(limit, needed, threads));
                 let Some(raised) = raised else {
-                    break Ok(Err(error));
+                    if config.align.keep_within_limits {
+                        break Ok(Err(error));
+                    }
+                    // The last resort: the entry is decided within the limits it has.
+                    config.align.keep_within_limits = true;
+                    let within = Request {
+                        config: &config,
+                        ..*request
+                    };
+                    break self.align(prepared, &located, &within, &mut worker);
                 };
                 config.align = raised;
                 let again = Request {
@@ -557,20 +566,36 @@ impl<'a> Searcher<'a> {
             };
             worker.align.seconds += started.elapsed().as_secs_f64();
             let name = self.entry_name(entry);
+            let budget = config.align.memory_budget;
             let last = match last {
-                Ok(Ok(last)) => {
+                Ok(Ok((last, None))) => {
                     summary.raised.push(format!(
                         "entry {name} passed a limit ({first}) and was aligned again alone \
                          with it raised"
                     ));
                     last
                 }
+                Ok(Ok((last, Some(limited)))) => {
+                    worker.align.limited_entries += 1;
+                    let left_out = match limited.left_out_contigs {
+                        0 => String::new(),
+                        contigs => format!(", {contigs} contigs left out"),
+                    };
+                    summary.limited.push(format!(
+                        "entry {name} was decided within its limits, as the memory budget of \
+                         {budget} bytes cannot raise them: {}; {:.1}% of its fragment bytes \
+                         kept{left_out}",
+                        limited.limit,
+                        100.0 * limited.kept
+                    ));
+                    last
+                }
                 Ok(Err(error)) => {
                     worker.align.limited_entries += 1;
+                    undecided = true;
                     summary.limited.push(format!(
                         "entry {name} was not decided: {error}; it cannot be raised further \
-                         within the memory budget of {} bytes",
-                        config.align.memory_budget
+                         within the memory budget of {budget} bytes"
                     ));
                     EntryEvent::Dropped {
                         entry,
@@ -593,6 +618,10 @@ impl<'a> Searcher<'a> {
             }
         }
         summary.align.add(&worker.align);
+        // A stop or a failure says more than an entry left undecided, so it takes precedence.
+        if undecided && matches!(summary.completion, Completion::Complete) {
+            summary.completion = Completion::ResourceIncomplete;
+        }
     }
 
     /// The name of an entry of the shard, or its index when the manifest does not hold it.
@@ -687,7 +716,7 @@ impl<'a> Searcher<'a> {
             error,
         })?;
         match last {
-            Ok(last) => emit(events, last, SearchStage::Align),
+            Ok((last, _)) => emit(events, last, SearchStage::Align),
             // Aligned again alone, once the other entries are done.
             Err(passed) => {
                 lock(request.passed).push((located, passed));
@@ -697,15 +726,15 @@ impl<'a> Searcher<'a> {
     }
 
     /// Stage 3 for one located entry: opens its packed sequence once, aligns and decides, and
-    /// returns the last event of the entry, confirmed (with the contig table) or dropped, or the
-    /// error of a limit of stage 3 that the entry passed.
+    /// returns the last event of the entry, confirmed (with the contig table) or dropped, and how
+    /// it was decided within its limits, or the error of a limit of stage 3 that it passed.
     fn align(
         &self,
         prepared: &PreparedQuery,
         located: &LocatedEntry,
         request: &Request<'_>,
         worker: &mut Worker,
-    ) -> Result<Result<EntryEvent, AlignStageError>, SearchError> {
+    ) -> Result<Result<(EntryEvent, Option<Limited>), AlignStageError>, SearchError> {
         let packed = self.shard.packed(located.entry)?;
         let windows = located.alignment_windows.iter();
         packed.will_need(windows.flat_map(|w| w.ranges.iter().map(|r| (w.contig as usize, r))));
@@ -729,18 +758,20 @@ impl<'a> Searcher<'a> {
             Err(error) => return Err(error.into()),
         };
         worker.align.counts.add(&aligned.work);
+        let limited = aligned.limited.clone();
         if !aligned.decision.qualifies {
-            return Ok(Ok(dropped(DropReason::Decision)));
+            return Ok(Ok((dropped(DropReason::Decision), limited)));
         }
         worker.align.confirmed_entries += 1;
         let mosaic = &aligned.decision.mosaic;
         let primary = mosaic.primary.iter().map(|selected| &selected.fragment);
         let fragments = primary.chain(&mosaic.alternatives);
         let contigs = packed.contigs(fragments.map(|fragment| fragment.contig_index))?;
-        Ok(Ok(EntryEvent::Confirmed {
+        let confirmed = EntryEvent::Confirmed {
             aligned: Box::new(aligned),
             contigs,
-        }))
+        };
+        Ok(Ok((confirmed, limited)))
     }
 }
 
