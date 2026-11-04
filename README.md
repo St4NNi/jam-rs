@@ -222,6 +222,9 @@ Normal options:
 - `--circular`: treat query sequences as circular. An alignment fragment that wraps across the
   end of the query is reported with an end coordinate beyond the query length. By default,
   queries are treated as linear.
+- `--skip-self`: leave out the assembly whose name is the name of the query record, so that a
+  record that is also in the index is not aligned with itself and gets no line of its own. The
+  other assemblies are searched as without it. It works only with local shards.
 - `-v, --verbose`: write one progress line per query to standard error, with its status, counts
   and miss probability. Pass twice (`-vv`) to also write per-assembly debug lines.
 
