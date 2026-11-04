@@ -9,7 +9,32 @@ use crate::align::BandConfig;
 use crate::align::anchors::QueryTable;
 use crate::align::{AlignmentError, Budgeted, Strand, bases_match, known_bases};
 use crate::seeds::{base_code, kmers, reverse_complement};
+use rayon::prelude::*;
 use std::mem::size_of;
+use std::ops::Range;
+
+/// Window bases from which the starts and walks of a window are found on all threads.
+#[cfg(not(test))]
+const PARALLEL_FROM: usize = 1 << 20;
+/// As in builds, but tests may lower it.
+#[cfg(test)]
+pub(crate) static PARALLEL_FROM: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1 << 20);
+
+/// Window positions scanned for match starts by one task.
+const SCAN_POSITIONS: usize = 1 << 16;
+
+/// Match starts walked by one task, extended to whole diagonals.
+const WALK_STARTS: usize = 1 << 14;
+
+/// Whether a window of `bases` is scanned and walked on the threads of the current pool.
+fn parallel(bases: usize) -> bool {
+    #[cfg(test)]
+    let from = PARALLEL_FROM.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    let from = PARALLEL_FROM;
+    bases >= from && rayon::current_num_threads() > 1
+}
 
 /// The best-scoring ungapped stretch around one or more match starts of a diagonal. `contig` is
 /// the start in the oriented window (the reverse complement for the reverse strand) and `query`
@@ -83,30 +108,58 @@ pub fn dense_walks(
             diagonal
         }
     };
-    // One scan finds the starts of both strands; the starts are priced as they come, and none
-    // are kept once they pass the budget.
-    let (mut count, mut forward, mut backward) = (0usize, Vec::new(), Vec::new());
-    match_starts(table, window, above, &mut |strand, contig, query| {
-        count += 1;
-        if price(count) <= budget {
-            let starts = if strand.is_reverse() {
-                &mut backward
-            } else {
-                &mut forward
-            };
-            starts.push(Start {
-                diagonal: diagonal(contig, query),
-                contig,
-                query,
-            });
-        }
-    });
-    if price(count) > budget {
+    let over = |count: usize| {
         let needed = Some(price(count) as u64);
-        return Err(AlignmentError::ChainingBudget(
-            Budgeted::MatchStarts,
-            needed,
-        ));
+        AlignmentError::ChainingBudget(Budgeted::MatchStarts, needed)
+    };
+    let parallel = parallel(window.len());
+    let (count, mut forward, mut backward) = if parallel {
+        // Counted on all threads first, so the starts are held only once they fit.
+        let positions = window.len() + 1 - a;
+        let parts: Vec<Range<usize>> = (0..positions)
+            .step_by(SCAN_POSITIONS)
+            .map(|start| start..(start + SCAN_POSITIONS).min(positions))
+            .collect();
+        let counts = count_starts(table, window, above, &parts);
+        let count = counts
+            .iter()
+            .map(|(forward, reverse)| forward + reverse)
+            .sum();
+        if price(count) > budget {
+            return Err(over(count));
+        }
+        let (forward, backward) = fill_starts(table, window, above, &parts, &counts, &diagonal);
+        (count, forward, backward)
+    } else {
+        // One scan finds the starts of both strands; the starts are priced as they come, and
+        // none are kept once they pass the budget.
+        let (mut count, mut forward, mut backward) = (0usize, Vec::new(), Vec::new());
+        let positions = 0..window.len() + 1 - a;
+        match_starts(
+            table,
+            window,
+            positions,
+            above,
+            &mut |strand, contig, query| {
+                count += 1;
+                if price(count) <= budget {
+                    let starts = if strand.is_reverse() {
+                        &mut backward
+                    } else {
+                        &mut forward
+                    };
+                    starts.push(Start {
+                        diagonal: diagonal(contig, query),
+                        contig,
+                        query,
+                    });
+                }
+            },
+        );
+        (count, forward, backward)
+    };
+    if price(count) > budget {
+        return Err(over(count));
     }
     let reverse = if backward.is_empty() {
         Vec::new()
@@ -118,10 +171,23 @@ pub fn dense_walks(
         (Strand::Forward, window, &mut forward),
         (Strand::Reverse, &reverse[..], &mut backward),
     ] {
-        starts.sort_unstable();
-        for group in starts.chunk_by(|a, b| a.diagonal == b.diagonal) {
-            walk_diagonal(table, sequence, strand, group, config, &mut walks);
+        if !parallel {
+            starts.sort_unstable();
+            for group in starts.chunk_by(|a, b| a.diagonal == b.diagonal) {
+                walk_diagonal(table, sequence, strand, group, config, &mut walks);
+            }
+            continue;
         }
+        // Equal starts are equal in every field, so the unstable sort gives one order.
+        starts.par_sort_unstable();
+        let walked = WalkedStarts {
+            table,
+            sequence,
+            strand,
+            config,
+            copies,
+        };
+        walked.walk_all(starts, &mut walks);
     }
     Ok(DenseWalks { walks, reverse })
 }
@@ -176,12 +242,14 @@ fn periodic_walks(
 fn match_starts(
     table: &QueryTable,
     window: &[u8],
+    positions: Range<usize>,
     above: usize,
     visit: &mut dyn FnMut(Strand, u32, u32),
 ) {
     let a = usize::from(table.anchors().a);
-    kmers(window, table.anchors().a, |kmer| {
-        let start = kmer.position;
+    let end = (positions.end + a - 1).min(window.len());
+    kmers(&window[positions.start..end], table.anchors().a, |kmer| {
+        let start = positions.start + kmer.position;
         if !table.may_hold(kmer.forward) {
             return;
         }
@@ -207,6 +275,168 @@ fn match_starts(
             }
         }
     });
+}
+
+/// The forward and reverse match starts of each part of the window positions, counted on all
+/// threads.
+fn count_starts(
+    table: &QueryTable,
+    window: &[u8],
+    above: usize,
+    parts: &[Range<usize>],
+) -> Vec<(usize, usize)> {
+    parts
+        .par_iter()
+        .map(|part| {
+            let (mut forward, mut reverse) = (0, 0);
+            match_starts(
+                table,
+                window,
+                part.clone(),
+                above,
+                &mut |strand, _, _| match strand.is_reverse() {
+                    true => reverse += 1,
+                    false => forward += 1,
+                },
+            );
+            (forward, reverse)
+        })
+        .collect()
+}
+
+/// The forward and reverse match starts of the window, found on all threads in the parts that
+/// `counts` counted, each written to its own place, in the order one scan finds them.
+fn fill_starts(
+    table: &QueryTable,
+    window: &[u8],
+    above: usize,
+    parts: &[Range<usize>],
+    counts: &[(usize, usize)],
+    diagonal: &(dyn Fn(u32, u32) -> i64 + Sync),
+) -> (Vec<Start>, Vec<Start>) {
+    let empty = Start {
+        diagonal: 0,
+        contig: 0,
+        query: 0,
+    };
+    let (forwards, reverses): (usize, usize) =
+        counts.iter().fold((0, 0), |(f, r), &(a, b)| (f + a, r + b));
+    let (mut forward, mut backward) = (vec![empty; forwards], vec![empty; reverses]);
+    let (mut forward_rest, mut backward_rest) = (&mut forward[..], &mut backward[..]);
+    let mut places = Vec::with_capacity(parts.len());
+    for (part, &(forwards, reverses)) in parts.iter().zip(counts) {
+        let (own_forward, rest) = std::mem::take(&mut forward_rest).split_at_mut(forwards);
+        forward_rest = rest;
+        let (own_backward, rest) = std::mem::take(&mut backward_rest).split_at_mut(reverses);
+        backward_rest = rest;
+        places.push((part.clone(), own_forward, own_backward));
+    }
+    places
+        .into_par_iter()
+        .for_each(|(part, forward, backward)| {
+            let (mut forwards, mut reverses) = (0, 0);
+            match_starts(table, window, part, above, &mut |strand, contig, query| {
+                let start = Start {
+                    diagonal: diagonal(contig, query),
+                    contig,
+                    query,
+                };
+                if strand.is_reverse() {
+                    backward[reverses] = start;
+                    reverses += 1;
+                } else {
+                    forward[forwards] = start;
+                    forwards += 1;
+                }
+            });
+        });
+    (forward, backward)
+}
+
+/// What the walks of the sorted starts of one strand read, for walking them on all threads.
+struct WalkedStarts<'a> {
+    table: &'a QueryTable,
+    sequence: &'a [u8],
+    strand: Strand,
+    config: BandConfig,
+    /// The most walks one start gives.
+    copies: usize,
+}
+
+impl WalkedStarts<'_> {
+    /// Walks the sorted `starts` in tasks of whole diagonals and adds the walks to `walks` in the
+    /// order one loop adds them. Each task writes into the places of its starts; a task with more
+    /// walks keeps the rest apart.
+    fn walk_all(&self, starts: &[Start], walks: &mut Vec<Walk>) {
+        let mut tasks = Vec::new();
+        let mut rest = starts;
+        while !rest.is_empty() {
+            let mut end = WALK_STARTS.min(rest.len());
+            while end < rest.len() && rest[end - 1].diagonal == rest[end].diagonal {
+                end += 1;
+            }
+            let (task, after) = rest.split_at(end);
+            tasks.push(task);
+            rest = after;
+        }
+        let first = walks.len();
+        let places = starts.len().saturating_mul(self.copies);
+        let empty = Walk {
+            strand: self.strand,
+            contig: 0,
+            query: 0,
+            length: 0,
+        };
+        walks.resize(first + places, empty);
+        let mut free = &mut walks[first..];
+        let mut jobs = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let (own, after) = std::mem::take(&mut free).split_at_mut(task.len() * self.copies);
+            free = after;
+            jobs.push((task, own));
+        }
+        let ends: Vec<(usize, usize, Vec<Walk>)> = jobs
+            .into_par_iter()
+            .map(|(task, own)| {
+                let (mut used, mut more) = (0, Vec::new());
+                let (table, sequence, strand, config) =
+                    (self.table, self.sequence, self.strand, self.config);
+                let mut found = Vec::new();
+                for group in task.chunk_by(|a, b| a.diagonal == b.diagonal) {
+                    walk_diagonal(table, sequence, strand, group, config, &mut found);
+                    for walk in found.drain(..) {
+                        match own.get_mut(used) {
+                            Some(place) => {
+                                *place = walk;
+                                used += 1;
+                            }
+                            None => more.push(walk),
+                        }
+                    }
+                }
+                (own.len(), used, more)
+            })
+            .collect();
+        // Moves the walks of each task after those of the tasks before it.
+        let (mut read, mut write) = (first, first);
+        let spilled = ends.iter().any(|(_, _, more)| !more.is_empty());
+        let mut kept = Vec::new();
+        for (places, used, more) in ends {
+            match spilled {
+                true => {
+                    kept.extend_from_slice(&walks[read..read + used]);
+                    kept.extend(more);
+                }
+                false => walks.copy_within(read..read + used, write),
+            }
+            (read, write) = (read + places, write + used);
+        }
+        walks.truncate(match spilled {
+            true => first,
+            false => write,
+        });
+        walks.extend(kept);
+    }
 }
 
 /// Walks the starts of one diagonal; a start inside the previous walk gives none. A circular

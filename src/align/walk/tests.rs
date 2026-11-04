@@ -558,3 +558,59 @@ fn join_transitions_within_price() {
         last_price = price;
     }
 }
+
+#[test]
+fn parallel_walks_same() {
+    // A query of diverged repeat copies and tandem runs, and a window of its copies on both
+    // strands: the starts and walks found on four threads equal those of one loop, also for a
+    // circular query whose walks pass its origin, and the budget fails the same way.
+    use super::dense::PARALLEL_FROM;
+    use crate::seeds::reverse_complement;
+    use crate::test_support::with_substitutions;
+    use std::sync::atomic::Ordering;
+    let mut random = rng(41);
+    let element = random_bases(&mut random, 300);
+    let mut query = Vec::new();
+    while query.len() < 20_000 {
+        query.extend(random_bases(&mut random, 40));
+        query.extend(with_substitutions(&mut random, &element, 0.92));
+        query.extend(with_substitutions(&mut random, &b"AGT".repeat(40), 0.95));
+    }
+    let mut window = Vec::new();
+    for copy in 0..6 {
+        let changed = with_substitutions(&mut random, &query, 0.97);
+        window.extend(match copy % 2 {
+            0 => changed,
+            _ => reverse_complement(&changed),
+        });
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    for circular in [false, true] {
+        let table = QueryTable::new(
+            &query,
+            circular,
+            AnchorConfig::default(),
+            ChainConfig::default(),
+        )
+        .unwrap();
+        let run = |from: usize, budget: usize| {
+            PARALLEL_FROM.store(from, Ordering::Relaxed);
+            let config = BandConfig::default();
+            pool.install(|| dense_walks(&table, &window, 0, config, budget))
+        };
+        let alone = run(usize::MAX, 256 << 20).unwrap();
+        let spread = run(0, 256 << 20).unwrap();
+        assert_eq!(spread.walks, alone.walks, "circular {circular}");
+        assert_eq!(spread.reverse, alone.reverse);
+        assert!(alone.walks.len() > 50_000, "{}", alone.walks.len());
+        let small = (
+            run(usize::MAX, 1 << 20).unwrap_err(),
+            run(0, 1 << 20).unwrap_err(),
+        );
+        assert_eq!(small.0.to_string(), small.1.to_string());
+    }
+    PARALLEL_FROM.store(1 << 20, Ordering::Relaxed);
+}
