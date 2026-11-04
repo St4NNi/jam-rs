@@ -23,7 +23,7 @@ pub use cigar::parse_cigar;
 pub use cigar::{EditOperation, EditRun, format_cigar};
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
 pub use walk::{
-    DenseResults, DenseWalk, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk,
+    DenseResults, DenseWalk, DenseWalks, JoinContext, JoinLimits, JoinScratch, KernelInput, Walk,
     align_dense_walk, dense_walks, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 #[cfg(test)]

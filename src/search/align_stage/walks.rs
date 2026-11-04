@@ -6,10 +6,11 @@ use super::contig::{ContigJob, WindowOutput};
 use super::paths::{AlignedPath, PathIndex};
 use super::place::query_room;
 use super::window::PreparedWindow;
-use super::{AlignStageError, Limit, WindowWorkspace};
+use super::{AlignStageError, AlignStageWorkspace, Limit, WindowWorkspace};
 use crate::align::{
     Alignment, AlignmentError, DenseResults, DenseWalk, EditOperation, JoinContext, JoinLimits,
-    JoinScratch, Walk, align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
+    JoinScratch, KernelInput, Walk, align_dense_walk, gap_continuation, holds_walk, long_enough,
+    walk_alignment,
 };
 use crate::decide::Fragment;
 use crate::seeds::base_code;
@@ -26,6 +27,14 @@ const JOINS_AHEAD_FROM: usize = 4_096;
 /// Short walks per thread in one block of joins computed ahead, and in one task of a block.
 const JOINS_PER_THREAD: usize = 1_024;
 const JOINS_PER_TASK: usize = 64;
+
+/// Walks of a window from which the kernel results of their gapped alignments are computed
+/// ahead on all threads.
+const WALKS_AHEAD_FROM: usize = 4_096;
+
+/// Walks per thread in one block of kernel results computed ahead, and in one task of a block.
+const WALKS_PER_THREAD: usize = 1_024;
+const WALKS_PER_TASK: usize = 128;
 
 /// Whether results are computed ahead: 0 by the size of the window, 1 always, 2 never.
 #[cfg(test)]
@@ -56,27 +65,37 @@ pub(super) fn align_walks(
     window: &PreparedWindow,
     output: &mut WindowOutput,
     workspace: &mut WindowWorkspace,
+    pool: &AlignStageWorkspace,
 ) -> Result<(), AlignStageError> {
     if window.walks.is_empty() {
         return Ok(());
     }
-    let gapped = walk_fragments(job, window, output, workspace)?;
+    let gapped = walk_fragments(job, window, output, workspace, pool)?;
     keep_gapped(job, window, output, gapped)
 }
 
 /// Keeps the ungapped fragment of every long walk that no earlier alignment covers, and returns
-/// the gapped alignments of walks that ask for one, with the walk index.
+/// the gapped alignments of walks that ask for one, with the walk index. In a window with many
+/// walks, the kernel results of each block of walks are computed ahead on all threads, with the
+/// buffers of `pool`.
 fn walk_fragments(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
     output: &mut WindowOutput,
     workspace: &mut WindowWorkspace,
+    pool: &AlignStageWorkspace,
 ) -> Result<Vec<(Alignment, usize)>, AlignStageError> {
     let (query, config) = (job.query, job.config);
     let mut results = DenseResults::default();
     let mut gapped = Vec::new();
+    let compute = ahead(window.walks.len(), WALKS_AHEAD_FROM);
+    let block = WALKS_PER_THREAD * rayon::current_num_threads();
     for (index, walk) in window.walks.iter().enumerate() {
         job.control.check()?;
+        if compute && index % block == 0 {
+            let walks = index..(index + block).min(window.walks.len());
+            results.set_ahead(kernels_ahead(job, window, walks, &output.paths, pool));
+        }
         // A walk shorter than a chain is only joined. A gapped alignment around it would fill
         // a box of millions of cells, mostly to find a few dozen matching bases.
         if !long_enough(walk, &query.table) {
@@ -109,6 +128,83 @@ fn walk_fragments(
         }
     }
     Ok(gapped)
+}
+
+/// The kernel results that the gapped alignments of the walks `range` of `window` may need,
+/// computed on all threads. Each task runs the steps of `walk_fragments` that lead to a kernel
+/// over a run of walks, with its own buffers and box results, and skips the walks that `paths`
+/// or its own alignments cover.
+fn kernels_ahead(
+    job: &ContigJob<'_>,
+    window: &PreparedWindow,
+    range: std::ops::Range<usize>,
+    paths: &PathIndex,
+    pool: &AlignStageWorkspace,
+) -> Vec<(KernelInput, Option<Alignment>)> {
+    let (query, config) = (job.query, job.config);
+    let (length, circular) = (query.length(), query.circular());
+    let band = i64::from(config.band.max_band());
+    let walks: Vec<usize> = range.collect();
+    let run = |task: &[usize], buffers: &mut WindowWorkspace| {
+        let (mut results, mut own) = (DenseResults::keeping_made(), PathIndex::default());
+        for &index in task {
+            let walk = &window.walks[index];
+            let covered = |paths: &PathIndex| paths.covers_walk(walk, length, circular);
+            if job.control.check().is_err() {
+                break;
+            }
+            if !long_enough(walk, &query.table) || covered(paths) || covered(&own) {
+                continue;
+            }
+            let oriented = window.oriented(walk);
+            let ungapped = walk_alignment(walk, oriented, window.start, &query.table, config.band);
+            let Ok(alignment) = ungapped else {
+                continue;
+            };
+            let walked = WalkAlignment {
+                walk,
+                later: &window.walks[index + 1..],
+                alignment: &alignment,
+            };
+            let (table, probe) = (&query.table, &mut buffers.probe);
+            let asks = mismatched(walked, oriented, query.bases())
+                || (u64::from(walk.length) < length
+                    && gap_continuation(walk, oriented, table, config.band, probe)
+                        .unwrap_or(false));
+            let around = |paths: &PathIndex| paths.aligned_around(walk, band, length, circular);
+            if asks && !around(paths) && !around(&own) {
+                let input = DenseWalk {
+                    walk,
+                    later: walked.later,
+                    window: &window.bases,
+                    offset: window.start,
+                    table: &query.table,
+                };
+                let alignment = &mut buffers.alignment;
+                if let Ok(Some(joined)) =
+                    align_dense_walk(input, config.band, alignment, &mut results)
+                {
+                    own.add(&AlignedPath::of(
+                        &joined,
+                        window.bases.len() as u64,
+                        window.start,
+                    ));
+                }
+            }
+            own.add_walk(walk);
+        }
+        results.take_made()
+    };
+    let tasks: Vec<Vec<_>> = walks
+        .par_chunks(WALKS_PER_TASK)
+        .map(|task| pool.lend(|buffers| run(task, buffers)))
+        .collect();
+    #[cfg(test)]
+    COMPUTED_AHEAD.fetch_add(
+        tasks.iter().map(Vec::len).sum::<usize>() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    tasks.into_iter().flatten().collect()
 }
 
 /// A walk, the walks of its window after it, and its ungapped alignment.

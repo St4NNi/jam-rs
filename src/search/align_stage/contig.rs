@@ -303,7 +303,7 @@ impl<'a> ContigJob<'a> {
                     fragments: Vec::new(),
                     work: AlignWork::default(),
                 };
-                workspace.lend(|buffers| self.align_window(window, output, buffers))
+                workspace.lend(|buffers| self.align_window(window, output, buffers, workspace))
             })
             .collect();
         // Joins are made only while no window has grown, as their fragments would be dropped.
@@ -341,16 +341,18 @@ impl<'a> ContigJob<'a> {
         Ok(grown)
     }
 
-    /// Aligns the chains and then the dense walks of one window.
+    /// Aligns the chains and then the dense walks of one window. Results computed ahead on other
+    /// threads use buffers of `pool`.
     fn align_window(
         &self,
         window: &PreparedWindow,
         mut output: WindowOutput,
         workspace: &mut WindowWorkspace,
+        pool: &AlignStageWorkspace,
     ) -> Result<WindowOutput, AlignStageError> {
         self.control.check()?;
         chains::align_chains(self, window, &mut output, &mut workspace.alignment)?;
-        walks::align_walks(self, window, &mut output, workspace)?;
+        walks::align_walks(self, window, &mut output, workspace, pool)?;
         Ok(output)
     }
 }

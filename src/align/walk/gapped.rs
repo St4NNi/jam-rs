@@ -35,6 +35,67 @@ pub struct DenseResults {
     kernels: Vec<(KernelBox, Option<Alignment>)>,
     /// The boxes of `kernels` by a hash of their kernel input, from the `SAME_FROM`th box on.
     same: FxHashMap<u64, Vec<usize>>,
+    /// Kernel results computed ahead on other threads, by their input; one is taken in place of
+    /// running the kernel on that input.
+    ahead: FxHashMap<KernelInput, Option<Alignment>>,
+    /// Whether the kernel results made are kept in `made`, for another loop to take.
+    keep_made: bool,
+    made: Vec<(KernelInput, Option<Alignment>)>,
+}
+
+/// The input of one kernel call in a window: strand, scores and band, and the query and contig
+/// positions and lengths, which fix the bases.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct KernelInput {
+    reverse: bool,
+    scores: AlignmentConfig,
+    query: (u64, usize),
+    contig: (u64, usize),
+}
+
+impl DenseResults {
+    /// Results that keep every kernel result they make, to be taken with `take_made`.
+    pub fn keeping_made() -> Self {
+        Self {
+            keep_made: true,
+            ..Self::default()
+        }
+    }
+
+    /// The kernel results made since the last call, by their input.
+    pub fn take_made(&mut self) -> Vec<(KernelInput, Option<Alignment>)> {
+        std::mem::take(&mut self.made)
+    }
+
+    /// Sets the kernel results computed ahead; those of the last call not taken are dropped.
+    pub fn set_ahead(&mut self, made: Vec<(KernelInput, Option<Alignment>)>) {
+        self.ahead.clear();
+        self.ahead.extend(made);
+    }
+
+    /// The kernel result of an input: computed ahead, or made now.
+    fn kernel(
+        &mut self,
+        workspace: &mut AlignmentWorkspace,
+        aligned: AlignmentInput<'_>,
+        strand: Strand,
+        scores: AlignmentConfig,
+    ) -> Result<Option<Alignment>, AlignmentError> {
+        let input = (self.keep_made || !self.ahead.is_empty()).then(|| KernelInput {
+            reverse: strand.is_reverse(),
+            scores,
+            query: (aligned.query_offset, aligned.query.len()),
+            contig: (aligned.contig_offset, aligned.contig.len()),
+        });
+        if let Some(found) = input.and_then(|input| self.ahead.remove(&input)) {
+            return Ok(found);
+        }
+        let found = kernel(workspace, aligned, strand, scores)?;
+        if let (true, Some(input)) = (self.keep_made, input) {
+            self.made.push((input, found.clone()));
+        }
+        Ok(found)
+    }
 }
 
 /// Boxes a window aligns before boxes with the same kernel input are looked up. A dense repeat
@@ -307,7 +368,7 @@ fn box_kernel(
     let found = match earlier {
         Some(found) => found,
         None => {
-            let found = kernel(workspace, aligned, cells.strand, scores)?;
+            let found = results.kernel(workspace, aligned, cells.strand, scores)?;
             if let Some(key) = key {
                 results
                     .same

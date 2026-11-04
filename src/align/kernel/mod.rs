@@ -31,7 +31,7 @@ const DEFAULT_MAX_CELLS: usize = 4_000_000;
 
 /// Scores and band of one alignment. The band holds the cells whose diagonal (contig position
 /// minus query position) lies within `band_width` of `diagonal_offset`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AlignmentConfig {
     /// The score of two equal bases; positive.
     pub match_score: i32,
