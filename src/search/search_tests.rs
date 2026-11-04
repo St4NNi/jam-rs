@@ -499,6 +499,24 @@ fn planted_query_confirmed() {
 }
 
 #[test]
+fn skipped_entry_left_out() {
+    // With entry 1 left out it has no events, and entry 0 has the same events as without.
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = planted_shard(directory.path());
+    let all = config(SearchStage::Align);
+    let skipped = SearchConfig {
+        skip_entry: Some(1),
+        ..all
+    };
+    let (_, with) = search(&shard, &query, false, &all, false);
+    let (summary, without) = search(&shard, &query, false, &skipped, false);
+    assert!(with.contains_key(&1) && !without.contains_key(&1));
+    assert_eq!(with.get(&0), without.get(&0));
+    assert_eq!(with.len(), without.len() + 1);
+    assert_eq!(summary.align.entries, 1);
+}
+
+#[test]
 fn decision_drops_entry() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());

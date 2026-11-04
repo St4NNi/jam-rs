@@ -21,6 +21,7 @@ use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_ad
 use crate::storage::lock;
 use clap::{Args, ValueEnum};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -59,6 +60,10 @@ pub struct SearchArgs {
     /// Treat the queries as circular instead of linear
     #[arg(long)]
     circular: bool,
+    /// Leave out the entry named as the query record, so that a record indexed too is not
+    /// aligned with itself and gets no line of its own
+    #[arg(long)]
+    skip_self: bool,
     #[command(flatten)]
     rule: RuleArgs,
     #[command(flatten)]
@@ -155,6 +160,11 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         eprintln!("jam: {note}");
     }
     if let Some(server) = &args.server {
+        if args.skip_self {
+            return Err(CliError::Usage(
+                "--skip-self works only with local shards".into(),
+            ));
+        }
         return run_remote(args, server);
     }
     let base = SearchConfig {
@@ -180,6 +190,19 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         .iter()
         .map(|open| Searcher::new(&open.shard))
         .collect::<Result<Vec<_>, _>>()?;
+    // With --skip-self, the entries of each shard by name.
+    let names: Vec<HashMap<&str, u32>> = match args.skip_self {
+        true => (shards.iter())
+            .map(|open| {
+                let entries = open.shard.manifest().entries.iter().enumerate();
+                entries
+                    .map(|(at, entry)| (entry.name.as_str(), at as u32))
+                    .collect()
+            })
+            .collect(),
+        false => Vec::new(),
+    };
+    let skipped = |shard: usize, name: &str| names.get(shard)?.get(name).copied();
     let mut sink = Sink::new(args)?;
     // The deadline of a query starts with its own search, so with one nothing is looked up ahead.
     let budget = match args.deadline {
@@ -214,9 +237,14 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
             sink.totals = QueryTotals::new(name);
             let query = Query { name, sequence };
             if at_once == 1 {
-                for ((open, searcher), kmers) in shards.iter().zip(&searchers).zip(&mut prepared) {
+                let searched = shards.iter().zip(&searchers).zip(&mut prepared).enumerate();
+                for (shard, ((open, searcher), kmers)) in searched {
                     let kmers = kmers[index].take();
                     let write = |event: EntryEvent| sink.event(open, name, &event);
+                    let config = SearchConfig {
+                        skip_entry: skipped(shard, name),
+                        ..config
+                    };
                     let summary = search_one(args, searcher, &config, &query, kmers, write)?;
                     limited += note_limits(name, &open.name, &summary);
                     sink.record(&open.name, Record::summary(name, &summary))?;
@@ -231,6 +259,10 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
                     let keep = |event| {
                         events.push(event);
                         Ok(())
+                    };
+                    let config = SearchConfig {
+                        skip_entry: skipped(shard, name),
+                        ..config
                     };
                     let summary = search_one(args, &searchers[shard], &config, &query, kmers, keep);
                     (events, summary)

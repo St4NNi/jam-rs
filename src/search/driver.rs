@@ -55,6 +55,9 @@ pub struct SearchConfig {
     pub flank: u64,
     /// Worker threads; 0 uses the current thread pool.
     pub threads: usize,
+    /// An entry that is left out after stage 1 and gets no events, such as the indexed record
+    /// of the query itself.
+    pub skip_entry: Option<u32>,
     /// The settings of stage 3.
     pub align: AlignStageConfig,
 }
@@ -81,6 +84,7 @@ impl Default for SearchConfig {
             max_seed_hits: 1 << 25,
             flank: 8_192,
             threads: 0,
+            skip_entry: None,
             align: AlignStageConfig::default(),
         }
     }
@@ -430,7 +434,7 @@ impl<'a> Searcher<'a> {
             return summary;
         }
         let start = PartStart::now();
-        let sketch = match sketch_stage_known(
+        let mut sketch = match sketch_stage_known(
             self.shard.seed_file(),
             query_kmers,
             request.known,
@@ -453,6 +457,11 @@ impl<'a> Searcher<'a> {
             ..sketch.work
         };
         summary.times.sketch = start.finish();
+        if let Some(skipped) = config.skip_entry {
+            sketch
+                .candidates
+                .retain(|candidate| candidate.entry != skipped);
+        }
         for candidate in &sketch.candidates {
             let possible = EntryEvent::Possible {
                 entry: candidate.entry,
