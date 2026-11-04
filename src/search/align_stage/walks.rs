@@ -8,16 +8,45 @@ use super::place::query_room;
 use super::window::PreparedWindow;
 use super::{AlignStageError, Limit, WindowWorkspace};
 use crate::align::{
-    Alignment, DenseResults, DenseWalk, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
-    align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
+    Alignment, AlignmentError, DenseResults, DenseWalk, EditOperation, JoinContext, JoinLimits,
+    JoinScratch, Walk, align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 use crate::decide::Fragment;
 use crate::seeds::base_code;
+use rayon::prelude::*;
 use std::cmp::Reverse;
 
 /// Walks shorter than this, or than the rule's fragment minimum when it is larger, are tried for
 /// joins with their neighbours. A join counts from the rule's fragment minimum.
 const SHORT_WALK_LENGTH: u64 = 100;
+
+/// Short walks of a window from which their joins are computed ahead on all threads.
+const JOINS_AHEAD_FROM: usize = 4_096;
+
+/// Short walks per thread in one block of joins computed ahead, and in one task of a block.
+const JOINS_PER_THREAD: usize = 1_024;
+const JOINS_PER_TASK: usize = 64;
+
+/// Whether results are computed ahead: 0 by the size of the window, 1 always, 2 never.
+#[cfg(test)]
+pub(crate) static AHEAD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Results computed ahead, for tests.
+#[cfg(test)]
+pub(crate) static COMPUTED_AHEAD: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Whether the results of `items` items of a window are computed ahead on the threads of the
+/// current pool: from `from` items, when the pool has several threads.
+fn ahead(items: usize, from: usize) -> bool {
+    #[cfg(test)]
+    match AHEAD.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    items >= from && rayon::current_num_threads() > 1
+}
 
 /// Aligns the walks of `window`: every long walk is an ungapped fragment, and long walks with
 /// changes are also aligned with gaps (kept once per copy). Short walks are joined later, by
@@ -279,28 +308,77 @@ pub(super) fn join_short_walks(
     // No fragment of `aligned` holds a short walk, so only the joins made before are asked.
     let mut made_before = JoinedIndex::default();
     let length = window.bases.len() as u64;
-    for index in short {
-        job.control.check()?;
-        let walk = &walks[index];
-        let is_held = match off {
-            true => held(&joined, walk),
-            false => made_before.holds(&joined, walk, length, window.start, &holds),
+    let is_held = |joined: &[Fragment], made_before: &JoinedIndex, walk: &Walk| match off {
+        true => held(joined, walk),
+        false => made_before.holds(joined, walk, length, window.start, &holds),
+    };
+    // In blocks: the joins of a block are computed ahead on all threads, then taken in order.
+    let compute = ahead(short.len(), JOINS_AHEAD_FROM);
+    let block = match compute {
+        true => JOINS_PER_THREAD * rayon::current_num_threads(),
+        false => short.len(),
+    };
+    for part in short.chunks(block) {
+        let unheld = |&index: &usize| !is_held(&joined, &made_before, &walks[index]);
+        let mut computed = match compute {
+            true => joins_ahead(job, window, part, &unheld, &*scratch, &context),
+            false => Vec::new(),
         };
-        if is_held {
-            continue;
-        }
-        let oriented = window.oriented(&walks[index]);
-        if let Some(join) = scratch.join_through(walks, index, oriented, window.start, &context)? {
-            joined.push(Fragment::place(
-                job.contig,
-                join,
-                query.length(),
-                query.circular(),
-            )?);
-            made_before.grow(&joined);
+        for (at, &index) in part.iter().enumerate() {
+            job.control.check()?;
+            if is_held(&joined, &made_before, &walks[index]) {
+                continue;
+            }
+            let oriented = window.oriented(&walks[index]);
+            let join = match computed.get_mut(at).and_then(Option::take) {
+                Some(join) => join,
+                None => scratch.join_through(walks, index, oriented, window.start, &context),
+            };
+            if let Some(join) = join? {
+                joined.push(Fragment::place(
+                    job.contig,
+                    join,
+                    query.length(),
+                    query.circular(),
+                )?);
+                made_before.grow(&joined);
+            }
         }
     }
     Ok(joined)
+}
+
+/// The join through each short walk of `part` (indexes into the walks of `window`) that is
+/// `unheld`, computed on all threads with buffers that share the walk orders of `prepared`.
+/// `None` for the walks left out and after a stop.
+fn joins_ahead(
+    job: &ContigJob<'_>,
+    window: &PreparedWindow,
+    part: &[usize],
+    unheld: &(dyn Fn(&usize) -> bool + Sync),
+    prepared: &JoinScratch,
+    context: &JoinContext<'_>,
+) -> Vec<Option<Result<Option<Alignment>, AlignmentError>>> {
+    let walks = &window.walks;
+    let tasks: Vec<Vec<_>> = part
+        .par_chunks(JOINS_PER_TASK)
+        .map(|task| {
+            let mut scratch = JoinScratch::sharing(context);
+            let join = |index: &usize| {
+                let oriented = window.oriented(&walks[*index]);
+                let (at, offset) = (*index, window.start);
+                (job.control.check().is_ok() && unheld(index))
+                    .then(|| scratch.join_shared(prepared, walks, at, oriented, offset, context))
+            };
+            task.iter().map(join).collect()
+        })
+        .collect();
+    #[cfg(test)]
+    COMPUTED_AHEAD.fetch_add(
+        tasks.iter().flatten().flatten().count() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    tasks.into_iter().flatten().collect()
 }
 
 /// The joins made so far in a window, looked up by contig position as they grow: runs of joins

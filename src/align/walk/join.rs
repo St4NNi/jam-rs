@@ -84,6 +84,15 @@ impl JoinScratch {
         self.piece = Vec::with_capacity(reach(context) as usize);
     }
 
+    /// Buffers that join the walks of a window on another thread, with the walk orders of the
+    /// buffers that prepared it: the piece matrix, and the linked walks and parts as the joins
+    /// need them.
+    pub fn sharing(context: &JoinContext<'_>) -> Self {
+        let mut scratch = Self::default();
+        scratch.matrix.fit(reach(context) as usize + 1);
+        scratch
+    }
+
     /// The bytes the walk orders, linked walks and parts hold now.
     #[cfg(test)]
     pub(crate) fn walk_bytes(&self) -> usize {
@@ -108,7 +117,33 @@ impl JoinScratch {
         offset: u64,
         context: &JoinContext<'_>,
     ) -> Result<Option<Alignment>, AlignmentError> {
-        self.link_walks(walks, at, context);
+        self.join_ordered(None, walks, at, oriented, offset, context)
+    }
+
+    /// As `join_through`, from buffers made by `sharing`, with the walk orders of `prepared`.
+    pub fn join_shared(
+        &mut self,
+        prepared: &JoinScratch,
+        walks: &[Walk],
+        at: usize,
+        oriented: &[u8],
+        offset: u64,
+        context: &JoinContext<'_>,
+    ) -> Result<Option<Alignment>, AlignmentError> {
+        self.join_ordered(Some(prepared), walks, at, oriented, offset, context)
+    }
+
+    /// The join through walk `at`, with the walk orders of `prepared`, or its own without.
+    fn join_ordered(
+        &mut self,
+        prepared: Option<&JoinScratch>,
+        walks: &[Walk],
+        at: usize,
+        oriented: &[u8],
+        offset: u64,
+        context: &JoinContext<'_>,
+    ) -> Result<Option<Alignment>, AlignmentError> {
+        self.link_walks(prepared, walks, at, context);
         if self.linked.len() < 2 {
             return Ok(None);
         }
@@ -136,7 +171,13 @@ impl JoinScratch {
     }
 
     /// Links walks to walk `at` on both sides; a circular join covers the query at most once.
-    fn link_walks(&mut self, walks: &[Walk], at: usize, context: &JoinContext<'_>) {
+    fn link_walks(
+        &mut self,
+        prepared: Option<&JoinScratch>,
+        walks: &[Walk],
+        at: usize,
+        context: &JoinContext<'_>,
+    ) {
         let length = u64::from(context.table.query_length());
         self.linked.clear();
         self.linked.push(at as u32);
@@ -146,7 +187,7 @@ impl JoinScratch {
             while let Some(Link {
                 walk: next,
                 query_gap,
-            }) = self.link(walks, current, after, context)
+            }) = self.link(prepared, walks, current, after, context)
             {
                 span += query_gap + u64::from(walks[next].length);
                 if span > length {
@@ -165,6 +206,7 @@ impl JoinScratch {
     /// with both pieces between them within the reach and drift, and the query piece length.
     fn link(
         &self,
+        prepared: Option<&JoinScratch>,
         walks: &[Walk],
         at: usize,
         after: bool,
@@ -173,12 +215,13 @@ impl JoinScratch {
         let reach = reach(context);
         let length = u64::from(context.table.query_length());
         let walk = walks[at];
+        let orders = prepared.unwrap_or(self);
         let (order, low, high) = if after {
             let end = u64::from(walk.contig + walk.length);
-            (&self.starts, end, end + reach)
+            (&orders.starts, end, end + reach)
         } else {
             let start = u64::from(walk.contig);
-            (&self.ends, start.saturating_sub(reach), start)
+            (&orders.ends, start.saturating_sub(reach), start)
         };
         let key = |other: &Walk| {
             let contig = u64::from(other.contig) + if after { 0 } else { u64::from(other.length) };

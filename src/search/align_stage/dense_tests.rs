@@ -11,7 +11,7 @@ use crate::seeds::reverse_complement;
 use crate::test_support::{random_bases, rng};
 
 /// Every contig of an entry as one window.
-fn whole_contigs(shard: &Shard, entry: u32, query_length: u64) -> LocatedEntry {
+pub(super) fn whole_contigs(shard: &Shard, entry: u32, query_length: u64) -> LocatedEntry {
     let packed = shard.packed(entry).unwrap();
     let windows = (0..packed.contig_count())
         .map(|contig| {

@@ -3,6 +3,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+#[cfg(test)]
+mod ahead_tests;
 mod chains;
 mod config;
 mod contig;
