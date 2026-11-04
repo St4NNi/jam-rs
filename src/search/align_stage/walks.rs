@@ -277,9 +277,16 @@ pub(super) fn join_short_walks(
     // Longer walks first, so shifted copies inside a kept join are not joined again.
     short.sort_unstable_by_key(|&index| (Reverse(walks[index].length), index));
     // No fragment of `aligned` holds a short walk, so only the joins made before are asked.
+    let mut made_before = JoinedIndex::default();
+    let length = window.bases.len() as u64;
     for index in short {
         job.control.check()?;
-        if held(&joined, &walks[index]) {
+        let walk = &walks[index];
+        let is_held = match off {
+            true => held(&joined, walk),
+            false => made_before.holds(&joined, walk, length, window.start, &holds),
+        };
+        if is_held {
             continue;
         }
         let oriented = window.oriented(&walks[index]);
@@ -290,9 +297,57 @@ pub(super) fn join_short_walks(
                 query.length(),
                 query.circular(),
             )?);
+            made_before.grow(&joined);
         }
     }
     Ok(joined)
+}
+
+/// The joins made so far in a window, looked up by contig position as they grow: runs of joins
+/// each with a `HeldIndex`, halving in length from the first, then the joins added since.
+#[derive(Default)]
+struct JoinedIndex {
+    /// The first join of each run and the index of the run.
+    runs: Vec<(usize, HeldIndex)>,
+    /// The first join in no run.
+    indexed: usize,
+}
+
+impl JoinedIndex {
+    /// Whether a join of `joined` holds `walk`, as `holds` decides, in a window of `length` bases
+    /// from contig position `offset`.
+    fn holds(
+        &self,
+        joined: &[Fragment],
+        walk: &Walk,
+        length: u64,
+        offset: u64,
+        holds: &dyn Fn(&Fragment, &Walk) -> bool,
+    ) -> bool {
+        let mut indexed = self.runs.iter().flat_map(|(first, index)| {
+            let near = index.near(walk, length, offset);
+            near.map(move |at| first + at)
+        });
+        indexed.any(|at| holds(&joined[at], walk))
+            || joined[self.indexed..].iter().any(|join| holds(join, walk))
+    }
+
+    /// Indexes the joins added since the last run once they are `HELD_INDEX_FROM`, together with
+    /// the runs before that are not longer, so each join is indexed again only a few times.
+    fn grow(&mut self, joined: &[Fragment]) {
+        if !held_index_from(joined.len() - self.indexed) {
+            return;
+        }
+        let mut first = self.indexed;
+        while let Some(&(start, _)) = self.runs.last()
+            && first - start <= joined.len() - first
+        {
+            self.runs.pop();
+            first = start;
+        }
+        self.runs.push((first, HeldIndex::new(&joined[first..])));
+        self.indexed = joined.len();
+    }
 }
 
 /// Fragments of a window above this many are looked up through `HeldIndex`.
@@ -433,6 +488,63 @@ mod held_tests {
             held += holding.len();
             assert!(holding.iter().all(|at| offered.binary_search(at).is_ok()));
         }
+        assert!(held > 100, "{held}");
+    }
+
+    #[test]
+    fn growing_joins_found() {
+        // Joins added one at a time: the runs and the joins since answer as a scan of all.
+        let (length, offset, query_length) = (5_000u64, 1_000u64, 800u64);
+        let mut random = rng(71);
+        let strand = |reverse: bool| match reverse {
+            true => Strand::Reverse,
+            false => Strand::Forward,
+        };
+        let holds = |fragment: &Fragment, walk: &Walk| {
+            holds_walk(
+                &fragment.alignment,
+                walk,
+                length as usize,
+                offset,
+                query_length,
+            )
+        };
+        let (mut joined, mut index, mut held) = (Vec::new(), JoinedIndex::default(), 0);
+        for _ in 0..600 {
+            let span = random.random_range(20..400u64);
+            let contig = offset + random.random_range(0..length - span);
+            let query = random.random_range(0..query_length);
+            let alignment = Alignment {
+                score: 2 * span as i32,
+                strand: strand(random.random_range(0..2) == 1),
+                query_interval: Interval::new(query, query + span).unwrap(),
+                contig_interval: Interval::new(contig, contig + span).unwrap(),
+                runs: vec![EditRun {
+                    operation: EditOperation::Match,
+                    length: span as u32,
+                }],
+            };
+            joined.push(Fragment::place(0, alignment, query_length, true).unwrap());
+            index.grow(&joined);
+            for _ in 0..20 {
+                let span = random.random_range(1..60u32);
+                let walk = Walk {
+                    strand: strand(random.random_range(0..2) == 1),
+                    contig: random.random_range(0..length as u32 - span),
+                    query: random.random_range(0..query_length as u32),
+                    length: span,
+                };
+                let scan = joined.iter().any(|join| holds(join, &walk));
+                assert_eq!(index.holds(&joined, &walk, length, offset, &holds), scan);
+                held += usize::from(scan);
+            }
+        }
+        // Several runs were made and merged, and many walks were held.
+        assert!(
+            index.runs.len() > 1 && index.indexed > 500,
+            "{}",
+            index.runs.len()
+        );
         assert!(held > 100, "{held}");
     }
 }
